@@ -1,134 +1,107 @@
 #include <TM1637Display.h>
 
-// ===== Pins Configuration =====
+// ===== Pins =====
+#define TRIG_IN   4   // INSIDE
+#define ECHO_IN   5
+#define TRIG_OUT  6   // OUTSIDE
+#define ECHO_OUT  7
 
-// Ultrasonic Sensor 1 (Inside)
-#define TRIG1 4
-#define ECHO1 5
-
-// Ultrasonic Sensor 2 (Outside)
-#define TRIG2 6
-#define ECHO2 7
-
-// TM1637 Display
 #define CLK_PIN 2
 #define DIO_PIN 3
+#define BUZZER  8
 
-// Buzzer
-#define BUZZER 8
-
-// ===== Objects =====
 TM1637Display display(CLK_PIN, DIO_PIN);
 
+// ===== Constants =====
+const int DIST = 40;
+const unsigned long TIMEOUT = 1500;
+
+// ===== State =====
+enum State {
+  IDLE,
+  WAIT_IN,   // Outside -> Inside (ENTER)
+  WAIT_OUT   // Inside -> Outside (EXIT)
+};
+
+State state = IDLE;
+
 // ===== Variables =====
-int peopleCount = 0;           // عدد الأشخاص في الغرفة
-bool sensor1Triggered = false; // حالة السنسور الأول (داخل)
-bool sensor2Triggered = false; // حالة السنسور الثاني (خارج)
-unsigned long lastTriggerTime = 0;
+int peopleCount = 0;
+unsigned long tStart = 0;
 
-const int DETECTION_DISTANCE = 50; // أقل من 50 سم = في شخص قدام السنسور
-const int TIMEOUT = 2000;          // 2 ثانية بين السنسورين
-
-// ===== Helpers =====
-int getDistance(int trigPin, int echoPin) {
-  digitalWrite(trigPin, LOW);
+// ===== Functions =====
+int getDistance(int trig, int echo) {
+  digitalWrite(trig, LOW);
   delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH);
+  digitalWrite(trig, HIGH);
   delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
+  digitalWrite(trig, LOW);
 
-  long duration = pulseIn(echoPin, HIGH, 30000); // timeout 30ms
-
-  int distance = duration * 0.034 / 2; // سم
-
-  if (distance == 0) distance = 999;   // قراءة فاضية
-  return distance;
+  long d = pulseIn(echo, HIGH, 30000);
+  if (d == 0) return 999;
+  return d * 0.034 / 2;
 }
 
-void resetSensors() {
-  sensor1Triggered = false;
-  sensor2Triggered = false;
-}
-
-void beep(int duration) {
+void beep(int ms) {
   digitalWrite(BUZZER, HIGH);
-  delay(duration);
+  delay(ms);
   digitalWrite(BUZZER, LOW);
 }
 
 // ===== Setup =====
 void setup() {
-  Serial.begin(9600);
-
-  pinMode(TRIG1, OUTPUT);
-  pinMode(ECHO1, INPUT);
-
-  pinMode(TRIG2, OUTPUT);
-  pinMode(ECHO2, INPUT);
-
+  pinMode(TRIG_IN, OUTPUT);
+  pinMode(ECHO_IN, INPUT);
+  pinMode(TRIG_OUT, OUTPUT);
+  pinMode(ECHO_OUT, INPUT);
   pinMode(BUZZER, OUTPUT);
 
-  display.setBrightness(0x0f);      // أعلى إضاءة
-  display.showNumberDec(0, true);   // ابدأ من 0
-
-  Serial.println("Room Counter Started...");
+  display.setBrightness(0x0f);
+  display.showNumberDec(peopleCount, true);
 }
 
-// ===== Main Loop =====
+// ===== Loop =====
 void loop() {
-  int d1 = getDistance(TRIG1, ECHO1); // inside
-  int d2 = getDistance(TRIG2, ECHO2); // outside
-
+  int dIn  = getDistance(TRIG_IN,  ECHO_IN);
+  int dOut = getDistance(TRIG_OUT, ECHO_OUT);
   unsigned long now = millis();
 
-  // لطباعة القيم للتجربة
-  Serial.print("Inside: "); Serial.print(d1);
-  Serial.print(" cm | Outside: "); Serial.print(d2);
-  Serial.print(" cm | Count: "); Serial.println(peopleCount);
+  switch (state) {
 
-  // ===== شخص يدخل: Outside ثم Inside =====
-  if (d2 < DETECTION_DISTANCE && !sensor2Triggered) {
-    sensor2Triggered = true;
-    lastTriggerTime = now;
-    Serial.println("Outside sensor triggered");
+    case IDLE:
+      if (dOut < DIST) {           // Outside first → ENTER
+        state = WAIT_IN;
+        tStart = now;
+      }
+      else if (dIn < DIST) {       // Inside first → EXIT
+        state = WAIT_OUT;
+        tStart = now;
+      }
+      break;
+
+    case WAIT_IN:
+      if (dIn < DIST && now - tStart < TIMEOUT) {
+        peopleCount++;
+        display.showNumberDec(peopleCount, true);
+        beep(80);
+        state = IDLE;
+      }
+      break;
+
+    case WAIT_OUT:
+      if (dOut < DIST && now - tStart < TIMEOUT) {
+        if (peopleCount > 0) peopleCount--;
+        display.showNumberDec(peopleCount, true);
+        beep(150);
+        state = IDLE;
+      }
+      break;
   }
 
-  if (sensor2Triggered && d1 < DETECTION_DISTANCE && !sensor1Triggered) {
-    sensor1Triggered = true;
-    if (now - lastTriggerTime < TIMEOUT) {
-      // دخول
-      peopleCount++;
-      if (peopleCount < 0) peopleCount = 0;
-      display.showNumberDec(peopleCount, true);
-      Serial.println(">>> Person ENTERED");
-      beep(80);
-      resetSensors();
-    }
+  // Timeout reset
+  if (state != IDLE && now - tStart > TIMEOUT) {
+    state = IDLE;
   }
 
-  // ===== شخص يخرج: Inside ثم Outside =====
-  if (d1 < DETECTION_DISTANCE && !sensor1Triggered) {
-    sensor1Triggered = true;
-    lastTriggerTime = now;
-    Serial.println("Inside sensor triggered");
-  }
-
-  if (sensor1Triggered && d2 < DETECTION_DISTANCE && !sensor2Triggered) {
-    sensor2Triggered = true;
-    if (now - lastTriggerTime < TIMEOUT) {
-      // خروج
-      if (peopleCount > 0) peopleCount--;
-      display.showNumberDec(peopleCount, true);
-      Serial.println("<<< Person EXITED");
-      beep(160);
-      resetSensors();
-    }
-  }
-
-  // لو التسلسل اتلغبط أو الوقت طول
-  if (now - lastTriggerTime > TIMEOUT) {
-    resetSensors();
-  }
-
-  delay(80); // تهدئة للقراءه
+  delay(80);
 }
